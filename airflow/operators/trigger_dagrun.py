@@ -173,7 +173,7 @@ class TriggerDagRunOperator(BaseOperator):
 
         if self.wait_for_completion:
             if not self.defer_to_triggerer:
-                # wait for dag to complete in this worker
+                # Wait for this dagrun to complete in this worker
                 while True:
                     self.log.info(
                         "Waiting for %s on %s to become allowed state %s ...",
@@ -191,7 +191,7 @@ class TriggerDagRunOperator(BaseOperator):
                         self.log.info("%s finished with allowed state %s", self.trigger_dag_id, state)
                         return
             else:
-                # defer waiting for this dagrun to complete in the triggerer
+                # Wait for this dagrun to complete in the triggerer
                 from airflow.triggers.wait_for_dagrun import WaitForDagRunTrigger
 
                 self.defer(

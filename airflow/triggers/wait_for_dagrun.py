@@ -11,9 +11,9 @@ class WaitForDagRunTrigger(BaseTrigger):
         self,
         dag_id: str,
         run_id: str,
-        allowed_states: List[DagRunState],
-        failed_states: List[DagRunState],
         poke_interval: int = 60,
+        allowed_states: List[DagRunState] = [DagRunState.SUCCESS],
+        failed_states: List[DagRunState] = [DagRunState.FAILED],
     ):
         self.dag_id = dag_id
         self.run_id = run_id
