@@ -96,6 +96,7 @@ class TriggerDagRunOperator(BaseOperator):
         execution_date: str | datetime.datetime | None = None,
         reset_dag_run: bool = False,
         wait_for_completion: bool = False,
+        defer_to_triggerer: bool = False,
         poke_interval: int = 60,
         allowed_states: list | None = None,
         failed_states: list | None = None,
@@ -107,6 +108,7 @@ class TriggerDagRunOperator(BaseOperator):
         self.conf = conf
         self.reset_dag_run = reset_dag_run
         self.wait_for_completion = wait_for_completion
+        self.defer_to_triggerer = defer_to_triggerer
         self.poke_interval = poke_interval
         self.allowed_states = allowed_states or [State.SUCCESS]
         self.failed_states = failed_states or [State.FAILED]
@@ -135,6 +137,7 @@ class TriggerDagRunOperator(BaseOperator):
             run_id = self.trigger_run_id
         else:
             run_id = DagRun.generate_run_id(DagRunType.MANUAL, parsed_execution_date)
+
         try:
             dag_run = trigger_dag(
                 dag_id=self.trigger_dag_id,
@@ -169,20 +172,48 @@ class TriggerDagRunOperator(BaseOperator):
         ti.xcom_push(key=XCOM_RUN_ID, value=dag_run.run_id)
 
         if self.wait_for_completion:
-            # wait for dag to complete
-            while True:
-                self.log.info(
-                    "Waiting for %s on %s to become allowed state %s ...",
-                    self.trigger_dag_id,
-                    dag_run.execution_date,
-                    self.allowed_states,
-                )
-                time.sleep(self.poke_interval)
+            if not self.defer_to_triggerer:
+                # wait for dag to complete in this worker
+                while True:
+                    self.log.info(
+                        "Waiting for %s on %s to become allowed state %s ...",
+                        self.trigger_dag_id,
+                        dag_run.execution_date,
+                        self.allowed_states,
+                    )
+                    time.sleep(self.poke_interval)
 
-                dag_run.refresh_from_db()
-                state = dag_run.state
-                if state in self.failed_states:
-                    raise AirflowException(f"{self.trigger_dag_id} failed with failed states {state}")
-                if state in self.allowed_states:
-                    self.log.info("%s finished with allowed state %s", self.trigger_dag_id, state)
-                    return
+                    dag_run.refresh_from_db()
+                    state = dag_run.state
+                    if state in self.failed_states:
+                        raise AirflowException(f"{self.trigger_dag_id} failed with failed states {state}")
+                    if state in self.allowed_states:
+                        self.log.info("%s finished with allowed state %s", self.trigger_dag_id, state)
+                        return
+            else:
+                # defer waiting for this dagrun to complete in the triggerer
+                from airflow.triggers.wait_for_dagrun import WaitForDagRunTrigger
+
+                self.defer(
+                    trigger=WaitForDagRunTrigger(
+                        dag_id=self.trigger_dag_id,
+                        run_id=run_id,
+                        allowed_states=self.allowed_states,
+                        failed_states=self.failed_states,
+                        poke_interval=self.poke_interval,
+                    ),
+                    method_name="execute_complete",
+                    kwargs={
+                        "trigger_run_id": self.trigger_run_id,
+                        "execution_date": parsed_execution_date.isoformat(),
+                    },
+                )
+        
+    def execute_complete(
+        self, context, trigger_run_id: str, execution_date: str, event=None
+    ):
+        # Because we startup a new ti on completion, we have to reset the XCOM_EXECUTION_DATE_ISO key-val that TriggerDagRunOperator set on the first execution
+        ti = context["task_instance"]
+        ti.xcom_push(key=XCOM_EXECUTION_DATE_ISO, value=execution_date)
+        ti.xcom_push(key=XCOM_RUN_ID, value=trigger_run_id)
+        self.log.info(event)
